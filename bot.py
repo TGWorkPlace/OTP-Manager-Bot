@@ -1,24 +1,13 @@
-"""
-bot.py
-------
-• Creates the Pyrogram Bot client.
-• Starts an aiohttp web server on PORT (default 8080) for Koyeb health checks.
-• Web routes:
-    GET /          → health check (200 OK)
-    GET /ping      → 200 "pong"
-    GET /restart   → gracefully restarts the bot process
-• Imports all handler modules so their decorators register on the client.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 from aiohttp import web
-from pyrogram import Client, idle
+from pyrogram import Client
 
 from config import API_ID, API_HASH, BOT_TOKEN, PORT
 from utils.logger import setup_logger
@@ -27,7 +16,7 @@ setup_logger()
 logger = logging.getLogger("otp_bot.bot")
 
 # ──────────────────────────────────────────────
-# Pyrogram Client
+# Pyrogram Client (NO plugins= here)
 # ──────────────────────────────────────────────
 
 bot = Client(
@@ -35,11 +24,15 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    plugins=dict(root="handlers"),  # auto-loads handlers/
 )
 
-# Also register generate.py handlers
-import generate  # noqa: F401  (side-effect: registers decorators)
+# Manually import every handler module AFTER bot is defined.
+# @Client.on_* decorators register on the class, so importing
+# the modules here is enough — no plugins= magic needed.
+import handlers.start      # noqa: F401, E402
+import handlers.getotp     # noqa: F401, E402
+import handlers.callbacks  # noqa: F401, E402
+import generate            # noqa: F401, E402
 
 
 # ──────────────────────────────────────────────
@@ -55,7 +48,6 @@ async def ping(_: web.Request) -> web.Response:
 
 
 async def restart(_: web.Request) -> web.Response:
-    """Trigger a graceful restart by re-execing the current process."""
     logger.warning("Restart requested via /restart endpoint")
 
     async def _do_restart() -> None:
@@ -79,7 +71,7 @@ def build_web_app() -> web.Application:
 # ──────────────────────────────────────────────
 
 async def main() -> None:
-    # Start the web server
+    # Start aiohttp
     web_app = build_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -89,13 +81,27 @@ async def main() -> None:
 
     # Start Pyrogram
     await bot.start()
-    logger.info("Bot started — @%s", (await bot.get_me()).username)
+    me = await bot.get_me()
+    logger.info("Bot started — @%s", me.username)
 
-    await idle()
+    # Keep alive: wait for SIGTERM / SIGINT instead of pyrogram.idle()
+    # so aiohttp stays responsive in the same event loop.
+    stop_event = asyncio.Event()
 
+    def _signal_handler() -> None:
+        logger.info("Shutdown signal received")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _signal_handler)
+
+    await stop_event.wait()
+
+    # Graceful shutdown
     await bot.stop()
     await runner.cleanup()
-    logger.info("Bot stopped")
+    logger.info("Bot stopped cleanly")
 
 
 if __name__ == "__main__":
