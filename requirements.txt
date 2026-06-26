@@ -3,4 +3,3 @@ TgCrypto
 motor
 pymongo
 aiohttp
-bson
